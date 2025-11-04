@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+  <meta charset="UTF-8" />
+  <title>小说 → 短剧剧本 自动改编工具（按字数分集 + 调试面板）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script>
+    // ===== 启动自定义代码机制 =====
+    (function () {
+      // 如果用户曾经用调试面板保存过一份完整HTML，就优先用那份
+      const saved = localStorage.getItem('novel2script_custom_html');
+      if (saved && saved.trim().length > 0) {
+        // 防止无限递归，只有当这份代码确实包含我们这个引导标记时再写入
+        // 这里简单点：只要有就写
+        document.open();
+        document.write(saved);
+        document.close();
+      }
+    })();
+  </script>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; background: #fff; }
+    #wrap { display: flex; gap: 10px; padding: 10px; min-height: 100vh; box-sizing: border-box; }
+    #left { flex: 1 1 65%; max-width: 65%; }
+    #right { flex: 1 1 35%; max-width: 35%; display: flex; flex-direction: column; gap: 8px; }
+
+    h2 { margin: 6px 0 10px; display: flex; justify-content: space-between; align-items: center; }
+    .row { margin-bottom: 6px; }
+    label { display: inline-block; width: 110px; vertical-align: top; }
+    input[type="text"], input[type="number"], textarea, select { padding: 3px 5px; }
+    textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
+    button { margin-right: 6px; }
+
+    #log { height: 150px; border: 1px solid #ddd; padding: 5px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; background: #fafafa; }
+    #apiStream { height: 120px; border: 1px solid #ddd; padding: 5px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; background: #fef8e7; }
+    #result { height: 220px; border: 1px solid #ddd; padding: 5px; overflow-y: auto; white-space: pre-wrap; }
+
+    #novelInfo { font-size: 12px; color: #555; }
+
+    #episodesList { border: 1px solid #ddd; flex: 0 0 170px; max-height: 200px; overflow-y: auto; }
+    #episodesList h3 { margin: 0; padding: 6px; border-bottom: 1px solid #eee; font-size: 13px; background: #f6f6f6; }
+    .ep-item { font-size: 12px; padding: 4px 6px; cursor: pointer; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+    .ep-item.active { background: #d8ecff; }
+    .ep-item.done { background: #e8ffe8; }
+    .ep-item .badge { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #ddd; }
+
+    #rawBox, #outlineBox, #scriptBox {
+      border: 1px solid #ddd;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #rawText, #outlineText, #scriptText {
+      width: 100%;
+      min-height: 90px;
+      resize: vertical;
+      font-size: 12px;
+    }
+
+    #accountBox { font-size: 12px; padding: 4px 6px; background: #eef7ff; border: 1px solid #cde1ff; margin-top: 6px; }
+    #estimateBox { font-size: 12px; padding: 4px 6px; background: #f5f5f5; border: 1px solid #ddd; }
+
+    /* 调试窗口 */
+    #debugPanel {
+      position: fixed;
+      right: 10px;
+      bottom: 10px;
+      width: 420px;
+      height: 0;
+      background: #1e1e1e;
+      color: #eee;
+      border: 1px solid #444;
+      border-radius: 4px 4px 0 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: height 0.2s ease-out;
+      z-index: 9999;
+    }
+    #debugHeader {
+      background: #2d2d2d;
+      padding: 4px 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+    }
+    #debugTextarea {
+      flex: 1;
+      width: 100%;
+      background: #1e1e1e;
+      color: #eee;
+      border: none;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 4px;
+      resize: none;
+    }
+    #debugFooter {
+      padding: 4px;
+      background: #2d2d2d;
+      text-align: right;
+    }
+    #versionTag {
+      font-size: 11px;
+      color: #888;
+    }
+
+    @media (max-width: 1100px) {
+      #wrap { flex-direction: column; }
+      #left, #right { max-width: 100%; }
+      #episodesList { max-height: 160px; }
+    }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <!-- 左侧 -->
+  <div id="left">
+    <h2>
+      小说 → 短剧剧本 自动改编工具（按字数分集）
+      <span id="versionTag">v1.0.0</span>
+    </h2>
+
+    <!-- 接口设置 -->
+    <div class="row">
+      <label>接口预设</label>
+      <select id="provider">
+        <option value="custom">自定义</option>
+        <option value="siliconflow" selected>SiliconFlow · DeepSeek-V3</option>
+        <option value="deepseek">DeepSeek 官方</option>
+        <option value="openai">OpenAI</option>
+      </select>
+      <span style="font-size:12px;color:#666;">选后自动填接口</span>
+    </div>
+    <div class="row">
+      <label>API地址</label>
+      <input id="endpoint" type="text" style="width: 360px" value="https://api.siliconflow.cn/v1/chat/completions" />
+    </div>
+    <div class="row">
+      <label>模型名</label>
+      <input id="model" type="text" style="width: 360px" value="deepseek-ai/DeepSeek-V3" />
+    </div>
+    <div class="row">
+      <label>API Key</label>
+      <input id="apiKey" type="text" style="width: 360px"
+             value="sk-gfxpwdyjgfgklbdtudhzwmaxcozgplidjahsolshtulpecqs" />
+    </div>
+
+    <!-- 分集规则 -->
+    <div class="row">
+      <label>每集原文字数</label>
+      <input id="charsPerEpisode" type="number" value="12000" style="width:80px" />
+      <span style="font-size:12px;color:#666;">直接按这个字数切小说</span>
+    </div>
+    <div class="row">
+      <label>单集时长(分)</label>
+      <input id="episodeDuration" type="number" value="2" style="width:60px" />
+      <label style="width:100px;">每分钟字数</label>
+      <input id="charPerMin" type="number" value="700" style="width:70px" />
+      <span style="font-size:12px;color:#666;">→ 用来算要压成多少字</span>
+    </div>
+
+    <!-- 调参 -->
+    <div class="row">
+      <label>max_tokens</label>
+      <input id="maxTokens" type="number" value="2048" style="width:90px" />
+      <label style="width:70px;">temperature</label>
+      <input id="temperature" type="number" step="0.01" value="0.8" style="width:80px" />
+      <label style="width:50px;">top_p</label>
+      <input id="topP" type="number" step="0.01" value="0.6" style="width:80px" />
+    </div>
+    <div class="row">
+      <label>剧本自检次数</label>
+      <input id="scriptCheckTimes" type="number" value="1" style="width:80px" />
+      <span style="font-size:12px;color:#555;">0=不自检</span>
+    </div>
+    <div class="row">
+      <label>API超时时间</label>
+      <input id="apiTimeout" type="number" value="120" style="width:80px" />
+      <span style="font-size:12px;color:#555;">秒</span>
+    </div>
+    <div class="row">
+      <label>API最大发送字数</label>
+      <input id="apiMaxChars" type="number" value="12000" style="width:80px" />
+      <span style="font-size:12px;color:#555;">超出会截断并提示</span>
+    </div>
+    <div class="row">
+      <label>价格(元/1k tok)</label>
+      <input id="pricePerK" type="number" value="0.005" style="width:80px" />
+      <label style="width:80px;">推理速度</label>
+      <input id="tokPerSec" type="number" value="30" style="width:60px" />
+      <span style="font-size:12px;color:#555;">tok/s</span>
+    </div>
+
+    <!-- 格式 -->
+    <div class="row">
+      <label>剧本格式说明</label>
+      <textarea id="formatHint" rows="5" placeholder="▲代表画面
+() 代表情绪或动作
+角色：&quot;台词&quot;
+【】代表字幕
+(OS) 代表内心对白
+-VO- 代表系统声音或者角色旁白
+请严格使用以上标记。"></textarea>
+    </div>
+
+    <!-- 上传 -->
+    <div class="row">
+      <label>上传小说TXT</label>
+      <input id="fileInput" type="file" accept=".txt,.md,.text" />
+    </div>
+    <div class="row" style="margin-left:110px;font-size:12px;color:#666;">
+      文件编码：
+      <select id="fileEncoding" style="width:140px;">
+        <option value="auto" selected>自动识别(推荐)</option>
+        <option value="utf-8">UTF-8</option>
+        <option value="gbk">GBK</option>
+        <option value="gb18030">GB18030</option>
+      </select>
+      <span style="font-size:11px;color:#999;">若有���请换成GBK/GB18030重传</span>
+    </div>
+    <div id="novelInfo">尚未上传小说</div>
+
+    <!-- 控制按钮 -->
+    <div class="row">
+      <button id="splitByCharsBtn" disabled>按字数分集</button>
+      <button id="startBtn" disabled>开始生成</button>
+      <button id="pauseBtn" disabled>暂停</button>
+      <button id="stopBtn" disabled>终止</button>
+      <button id="downloadBtn" disabled>下载合并剧本</button>
+      <button id="clearBtn">清空日志</button>
+      <button id="showDebugBtn" style="float:right;">调试/编辑代码</button>
+    </div>
+
+    <!-- 估算 -->
+    <div id="estimateBox">
+      <strong>估算信息</strong>
+      <div id="estimateContent">尚未分集，无法估算。</div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="row">
+      <label>运行日志</label>
+      <div id="log"></div>
+    </div>
+
+    <div class="row">
+      <label>API反馈</label>
+      <div id="apiStream"></div>
+    </div>
+
+    <!-- 导出 -->
+    <div class="row">
+      <label>导出设置</label>
+      <div>
+        最终输出集数：
+        <input id="finalEpisodeCount" type="number" value="0" style="width:70px;" />
+        <button id="exportBtn">打包输出</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label>结果预览</label>
+      <div id="result"></div>
+    </div>
+
+    <div id="accountBox">
+      <strong>账户信息：</strong>
+      <span id="accountInfo">尚未查询（仅 SiliconFlow 可查）。</span>
+    </div>
+  </div>
+
+  <!-- 右侧 -->
+  <div id="right">
+    <div id="episodesList">
+      <h3>分集结果</h3>
+    </div>
+
+    <div id="rawBox">
+      <strong>本集原文（可改）</strong>
+      <textarea id="rawText" placeholder="这里是本集的原文，可删减后保存。"></textarea>
+      <div>
+        <button id="saveRawBtn" disabled>保存原文</button>
+      </div>
+    </div>
+
+    <div id="outlineBox">
+      <strong>本集大纲（可改）</strong>
+      <textarea id="outlineText" placeholder="模型生成的大纲会出现在这里，你也可以自己写。"></textarea>
+      <div>
+        <button id="saveOutlineBtn" disabled>保存大纲</button>
+        <button id="regenEpisodeBtn" disabled>根据大纲重生本集</button>
+        <span id="outlineStatus" style="font-size:11px;color:#666;"></span>
+      </div>
+    </div>
+
+    <div id="scriptBox">
+      <strong>本集剧本（可改）</strong>
+      <textarea id="scriptText" placeholder="模型生成的剧本会出现在这里，你也可以自己改。"></textarea>
+      <div>
+        <button id="saveScriptBtn" disabled>保存剧本</button>
+        <button id="regenScriptBtn" disabled>只重生本集剧本</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 调试面板 -->
+<div id="debugPanel">
+  <div id="debugHeader">
+    <span>调试窗口（直接改整页HTML）</span>
+    <button id="closeDebugBtn" style="font-size:11px;">收起</button>
+  </div>
+  <textarea id="debugTextarea" spellcheck="false"></textarea>
+  <div id="debugFooter">
+    <button id="saveDebugBtn" style="font-size:11px;">保存并重载</button>
+  </div>
+</div>
+
+<script>
+  // ===== 全局状态 =====
+  let originalText = "";
+  let episodes = []; // {index, raw, outline, script, targetChars, rawLen, scriptScore, scriptReason}
+  let running = false;
+  let paused = false;
+  let stopRequested = false;
+  let currentEpisodeIndex = 0;
+  let apiCallCount = 0;
+
+  // ===== DOM =====
+  const providerEl = document.getElementById("provider");
+  const endpointEl = document.getElementById("endpoint");
+  const modelEl = document.getElementById("model");
+  const apiKeyEl = document.getElementById("apiKey");
+
+  const charsPerEpisodeEl = document.getElementById("charsPerEpisode");
+  const episodeDurationEl = document.getElementById("episodeDuration");
+  const charPerMinEl = document.getElementById("charPerMin");
+
+  const maxTokensEl = document.getElementById("maxTokens");
+  const tempEl = document.getElementById("temperature");
+  const topPEl = document.getElementById("topP");
+  const scriptCheckTimesEl = document.getElementById("scriptCheckTimes");
+  const apiTimeoutEl = document.getElementById("apiTimeout");
+  const apiMaxCharsEl = document.getElementById("apiMaxChars");
+
+  const pricePerKEl = document.getElementById("pricePerK");
+  const tokPerSecEl = document.getElementById("tokPerSec");
+
+  const formatHintEl = document.getElementById("formatHint");
+  const fileInput = document.getElementById("fileInput");
+  const fileEncodingEl = document.getElementById("fileEncoding");
+  const novelInfoEl = document.getElementById("novelInfo");
+
+  const splitByCharsBtn = document.getElementById("splitByCharsBtn");
+  const startBtn = document.getElementById("startBtn");
+  const pauseBtn = document.getElementById("pauseBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const downloadBtn = document.getElementById("downloadBtn");
+  const clearBtn = document.getElementById("clearBtn");
+
+  const logEl = document.getElementById("log");
+  const apiStreamEl = document.getElementById("apiStream");
+  const resultEl = document.getElementById("result");
+  const accountInfoEl = document.getElementById("accountInfo");
+  const episodesListEl = document.getElementById("episodesList");
+  const rawTextEl = document.getElementById("rawText");
+  const outlineTextEl = document.getElementById("outlineText");
+  const scriptTextEl = document.getElementById("scriptText");
+  const saveRawBtn = document.getElementById("saveRawBtn");
+  const saveOutlineBtn = document.getElementById("saveOutlineBtn");
+  const regenEpisodeBtn = document.getElementById("regenEpisodeBtn");
+  const saveScriptBtn = document.getElementById("saveScriptBtn");
+  const regenScriptBtn = document.getElementById("regenScriptBtn");
+  const outlineStatusEl = document.getElementById("outlineStatus");
+  const estimateContentEl = document.getElementById("estimateContent");
+  const exportBtn = document.getElementById("exportBtn");
+  const finalEpisodeCountEl = document.getElementById("finalEpisodeCount");
+  const versionTagEl = document.getElementById("versionTag");
+
+  // 调试面板DOM
+  const debugPanelEl = document.getElementById("debugPanel");
+  const showDebugBtn = document.getElementById("showDebugBtn");
+  const closeDebugBtn = document.getElementById("closeDebugBtn");
+  const debugTextareaEl = document.getElementById("debugTextarea");
+  const saveDebugBtn = document.getElementById("saveDebugBtn");
+
+  // ===== 工具函数 =====
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += `[${t}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function apiStream(msg, append = true) {
+    if (!append) apiStreamEl.textContent = msg;
+    else apiStreamEl.textContent += msg + "\n";
+    apiStreamEl.scrollTop = apiStreamEl.scrollHeight;
+  }
+  function safeParseJson(str) {
+    if (!str) return null;
+    try { return JSON.parse(str); } catch(e) {
+      const m = str.match(/\{[\s\S]*\}/);
+      if (m) { try { return JSON.parse(m[0]); } catch(e2) { return null; } }
+      return null;
+    }
+  }
+
+  async function fetchBalanceIfPossible() {
+    const apiKey = apiKeyEl.value.trim();
+    if (!apiKey) return;
+    if (providerEl.value !== "siliconflow") return;
+    try {
+      const res = await fetch("https://api.siliconflow.cn/v1/user/info", {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + apiKey }
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        accountInfoEl.textContent = "余额查询失败：" + txt;
+        return;
+      }
+      const data = await res.json();
+      const d = data.data || {};
+      accountInfoEl.textContent = `总余额：${d.totalBalance ?? "-"}，可用余额：${d.balance ?? "-"}，状态：${d.status ?? "-"}`;
+    } catch (e) {
+      accountInfoEl.textContent = "余额查询失败（浏览器限制或CORS）。";
+    }
+  }
+
+  async function callLLM(endpoint, payload, apiKey, stageText) {
+    const timeoutSec = parseInt(apiTimeoutEl.value, 10) || 120;
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), timeoutSec * 1000);
+    apiStream(`→ ${stageText}`, true);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+      },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal
+    });
+    clearTimeout(id);
+    apiCallCount++;
+    if (apiCallCount % 5 === 1) fetchBalanceIfPossible();
+    if (!res.ok) {
+      const txt = await res.text();
+      apiStream(`✗ ${stageText} 出错：${txt}`, true);
+      throw new Error(txt);
+    }
+    const data = await res.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    apiStream(`✓ ${stageText} 完成，长度 ${content.length}`, true);
+    return content;
+  }
+
+  // ===== 接口预设 =====
+  providerEl.addEventListener("change", () => {
+    const v = providerEl.value;
+    if (v === "siliconflow") {
+      endpointEl.value = "https://api.siliconflow.cn/v1/chat/completions";
+      modelEl.value = "deepseek-ai/DeepSeek-V3";
+    } else if (v === "deepseek") {
+      endpointEl.value = "https://api.deepseek.com/chat/completions";
+      modelEl.value = "deepseek-chat";
+    } else if (v === "openai") {
+      endpointEl.value = "https://api.openai.com/v1/chat/completions";
+      modelEl.value = "gpt-4o-mini";
+    }
+  });
+
+  // ===== 上传小说 =====
+  fileInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const enc = fileEncodingEl.value;
+    const reader = new FileReader();
+    if (enc === "auto") {
+      reader.onload = (ev) => {
+        const buffer = ev.target.result;
+        decodeAuto(buffer, file.name);
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = (ev) => {
+        originalText = ev.target.result;
+        afterTextLoaded(file.name);
+      };
+      reader.readAsText(file, enc);
+    }
+  });
+
+  function afterTextLoaded(fileName) {
+    novelInfoEl.textContent = `已加载：${fileName}，总长度：${originalText.length} 字符。`;
+    log(`小说已上传，总长度 ${originalText.length} 字符。`);
+    splitByCharsBtn.disabled = false;
+    startBtn.disabled = true;
+  }
+
+  function decodeAuto(buffer, fileName) {
+    let textUtf8 = "";
+    try { textUtf8 = new TextDecoder("utf-8",{fatal:false}).decode(buffer); } catch (e) { textUtf8 = ""; }
+    const badCount = (textUtf8.match(/\uFFFD/g) || []).length;
+    if (textUtf8.length > 0 && badCount / textUtf8.length < 0.01) {
+      originalText = textUtf8;
+      afterTextLoaded(fileName);
+      return;
+    }
+    try {
+      const textGbk = new TextDecoder("gb18030",{fatal:false}).decode(buffer);
+      const badCount2 = (textGbk.match(/\uFFFD/g) || []).length;
+      if (badCount2 / textGbk.length < 0.01) {
+        originalText = textGbk;
+        afterTextLoaded(fileName + "（自动识别为GB18030）");
+        return;
+      } else {
+        originalText = textGbk;
+        afterTextLoaded(fileName + "（可能有少量乱码，建议手动选编码再传）");
+        return;
+      }
+    } catch (e) {
+      originalText = textUtf8;
+      afterTextLoaded(fileName + "（自动识别失败，按UTF-8处理，可能乱码）");
+    }
+  }
+
+  // ===== 按字数分集 =====
+  function splitByChars() {
+    if (!originalText) {
+      alert("先上传小说");
+      return;
+    }
+    const per = parseInt(charsPerEpisodeEl.value,10) || 12000;
+    const epDuration = parseFloat(episodeDurationEl.value) || 2;
+    const charPerMin = parseInt(charPerMinEl.value,10) || 700;
+    const targetChars = Math.floor(epDuration * charPerMin);
+
+    episodes = [];
+    let cursor = 0;
+    const total = originalText.length;
+    while (cursor < total) {
+      const part = originalText.slice(cursor, cursor + per);
+      episodes.push({
+        index: episodes.length,
+        raw: part,
+        outline: "",
+        script: "",
+        targetChars: targetChars,
+        rawLen: part.length,
+        scriptScore: null,
+        scriptReason: ""
+      });
+      cursor += per;
+    }
+
+    novelInfoEl.textContent = `已按 ${per} 字/集 拆分：共 ${episodes.length} 集。`;
+    log(`已按字数分集：每集 ${per} 字，共 ${episodes.length} 集。`);
+    renderEpisodesList(0);
+    showEpisode(0);
+    startBtn.disabled = false;
+    saveRawBtn.disabled = false;
+    saveOutlineBtn.disabled = false;
+    regenEpisodeBtn.disabled = false;
+    saveScriptBtn.disabled = false;
+    regenScriptBtn.disabled = false;
+    downloadBtn.disabled = false;
+
+    updateEstimate();
+  }
+  splitByCharsBtn.addEventListener("click", splitByChars);
+
+  // ===== (改版) 估算：只显示平均值和总量 =====
+  function updateEstimate() {
+    if (!episodes.length) {
+      estimateContentEl.textContent = "尚未分集，无法估算。";
+      return;
+    }
+    const pricePerK = parseFloat(pricePerKEl.value) || 0;
+    const tokPerSec = parseFloat(tokPerSecEl.value) || 30;
+    const apiMaxChars = parseInt(apiMaxCharsEl.value,10) || 12000;
+
+    const n = episodes.length;
+    let totalRaw = 0;
+    let totalSend = 0;
+    let totalTarget = 0;
+    for (const ep of episodes) {
+      totalRaw += ep.rawLen;
+      totalSend += Math.min(ep.rawLen, apiMaxChars);
+      totalTarget += ep.targetChars;
+    }
+    const avgRaw = totalRaw / n;
+    const avgSend = totalSend / n;
+    const avgTarget = totalTarget / n;
+    const totalTokens = totalSend + totalTarget;
+    const totalCost = totalTokens / 1000 * pricePerK;
+    const totalSec = totalTokens / tokPerSec;
+
+    estimateContentEl.innerHTML =
+      `共 ${n} 集；每集原文≈ ${avgRaw.toFixed(0)} 字，发送≈ ${avgSend.toFixed(0)} 字，目标≈ ${avgTarget.toFixed(0)} 字；` +
+      `总耗时≈ ${(totalSec/60).toFixed(1)} 分，总费用≈ ￥${totalCost.toFixed(2)}（估算）。`;
+  }
+
+  // ===== 渲染分集列表 =====
+  function renderEpisodesList(activeIndex = null) {
+    episodesListEl.querySelectorAll(".ep-item").forEach(n=>n.remove());
+    episodes.forEach((ep, idx) => {
+      const div = document.createElement("div");
+      div.className = "ep-item";
+      if (ep.script) div.classList.add("done");
+      if (activeIndex !== null && activeIndex === idx) div.classList.add("active");
+      const left = document.createElement("span");
+      left.textContent = `第 ${idx+1} 集 (${ep.rawLen}字)`;
+      const right = document.createElement("span");
+      if (ep.scriptScore != null) {
+        const b = document.createElement("span");
+        b.className = "badge";
+        b.textContent = ep.scriptScore;
+        right.appendChild(b);
+      }
+      div.appendChild(left);
+      div.appendChild(right);
+      div.dataset.index = idx;
+      div.onclick = () => showEpisode(idx);
+      episodesListEl.appendChild(div);
+    });
+  }
+
+  function showEpisode(idx) {
+    const ep = episodes[idx];
+    if (!ep) return;
+    currentEpisodeIndex = idx;
+    rawTextEl.value = ep.raw || "";
+    outlineTextEl.value = ep.outline || "";
+    scriptTextEl.value = ep.script || "";
+    outlineStatusEl.textContent = `正在查看：第 ${idx+1} 集`;
+    renderEpisodesList(idx);
+  }
+
+  // ===== Prompt =====
+  function buildOneShotMessages(epRaw, formatHint, targetChars, epIndex) {
+    return [
+      { role: "system", content: "你是资深短剧编剧，擅长把长篇网文压缩成高爽点的短剧脚本。" },
+      {
+        role: "user",
+        content:
+`下面是一集需要改编的小说原文，请你把它压缩成一集短剧。
+
+要求：
+1. 原文可能有上万字，但【本集最终短剧脚本请控制在约 ${targetChars} 字左右】。
+2. 只保留最好看的桥段：冲突、反转、爽点、情绪爆发、反击、撕裂。
+3. 输出要同时给出：
+   - "outline": 本集剧情大纲（场景→冲突→转折→结果→结尾钩子）
+   - "script": 按我给的短剧格式写的对话+动作
+4. 说明性的、铺垫性的内容可一句话略写。
+5. 全部用JSON返回。
+
+【短剧格式说明】
+${formatHint}
+
+【原文开始】
+${epRaw}
+【原文结束】
+
+请只返回JSON，格式如下：
+{
+  "outline": "……",
+  "script": "……"
+}`
+      }
+    ];
+  }
+
+  function buildScriptCheckMessages(ep, formatHint) {
+    return [
+      { role: "system", content: "你是短剧剧本自检助手，只能输出 JSON。" },
+      {
+        role: "user",
+        content:
+`下面是本集的改编结果，请你做一次自检。
+
+【原文(截断后)】
+${ep.raw.slice(0, parseInt(apiMaxCharsEl.value,10) || 12000)}
+
+【大纲】
+${ep.outline}
+
+【剧本】
+${ep.script}
+
+检查点：
+1. 是否抓住了原文里最有戏剧性的部分（冲突/反转/爽点）
+2. 是否符合大纲
+3. 是否符合指定的短剧格式
+4. 字数是否大约在 ${ep.targetChars} 字这个量级
+请只返回JSON：
+{"pass": true/false, "script": "可用或你修改后的剧本", "score": 0-10, "reason": "问题说明"}
+`
+      }
+    ];
+  }
+
+  // ===== 生成某一集 =====
+  async function generateEpisode(i, onlyScript = false) {
+    const ep = episodes[i];
+    if (!ep) return;
+    const endpoint = endpointEl.value.trim();
+    const model = modelEl.value.trim();
+    const apiKey = apiKeyEl.value.trim();
+    const maxTokens = parseInt(maxTokensEl.value,10) || 2048;
+    const temperature = parseFloat(tempEl.value) || 0.8;
+    const top_p = parseFloat(topPEl.value) || 0.6;
+    const apiMaxChars = parseInt(apiMaxCharsEl.value,10) || 12000;
+    const scriptCheckTimes = parseInt(scriptCheckTimesEl.value,10) || 0;
+    const formatHint = formatHintEl.value.trim() || "▲代表画面\n()代表动作\n角色：\"台词\"";
+
+    let sendRaw = ep.raw;
+    if (sendRaw.length > apiMaxChars) {
+      sendRaw = sendRaw.slice(0, apiMaxChars);
+      log(`第 ${i+1} 集原文过长(${ep.raw.length})，按 ${apiMaxChars} 字截断发送。`);
+    }
+
+    if (!onlyScript) {
+      const msgs = buildOneShotMessages(sendRaw, formatHint, ep.targetChars, i+1);
+      const payload = { model, messages: msgs, temperature, max_tokens: maxTokens, top_p };
+      let text;
+      try {
+        text = await callLLM(endpoint, payload, apiKey, `第 ${i+1} 集 一次性生成(纲+剧本)`);
+      } catch (e) {
+        log(`第 ${i+1} 集生成失败：${e.message}`);
+        return;
+      }
+      const obj = safeParseJson(text);
+      if (obj) {
+        ep.outline = obj.outline || "";
+        ep.script  = obj.script  || "";
+      } else {
+        ep.outline = ep.outline || "";
+        ep.script  = text;
+      }
+    } else {
+      const msgs = [
+        { role: "system", content: "你是短剧编剧，请根据原文和大纲重写一版剧本。" },
+        {
+          role: "user",
+          content:
+`【原文(截断后)】
+${sendRaw}
+
+【大纲】
+${ep.outline}
+
+【格式要求】
+${formatHint}
+
+目标字数约 ${ep.targetChars} 字，请直接输出短剧剧本，不要解释。`
+        }
+      ];
+      const payload = { model, messages: msgs, temperature, max_tokens: maxTokens, top_p };
+      let text;
+      try {
+        text = await callLLM(endpoint, payload, apiKey, `第 ${i+1} 集 重生剧本`);
+      } catch (e) {
+        log(`第 ${i+1} 集重生剧本失败：${e.message}`);
+        return;
+      }
+      ep.script = text;
+    }
+
+    // 自检
+    if (scriptCheckTimes > 0) {
+      for (let t = 0; t < scriptCheckTimes; t++) {
+        const msgs = buildScriptCheckMessages(ep, formatHint);
+        const payload = { model, messages: msgs, temperature, max_tokens: 1024, top_p };
+        let text;
+        try {
+          text = await callLLM(endpoint, payload, apiKey, `第 ${i+1} 集 剧本自检(第${t+1}次)`);
+        } catch (e) {
+          log(`第 ${i+1} 集自检失败：${e.message}`);
+          break;
+        }
+        const obj = safeParseJson(text);
+        if (!obj) break;
+        ep.script = obj.script || ep.script;
+        ep.scriptScore = obj.score ?? null;
+        ep.scriptReason = obj.reason ?? "";
+        if (obj.pass) break;
+      }
+    }
+
+    // 更新预览
+    resultEl.textContent = episodes.filter(e => e.script).map(e => `【第${e.index+1}集】\n${e.script}`).join("\n\n");
+    showEpisode(i);
+    renderEpisodesList(i);
+    log(`第 ${i+1} 集生成完成。`);
+  }
+
+  // ===== 一键全部生成 =====
+  async function runAll() {
+    const apiKey = apiKeyEl.value.trim();
+    if (!apiKey) { alert("请先输入API Key"); return; }
+    if (!episodes.length) { alert("请先按字数分集"); return; }
+
+    running = true;
+    paused = false;
+    stopRequested = false;
+    startBtn.disabled = true;
+    splitByCharsBtn.disabled = true;
+    pauseBtn.disabled = false;
+    stopBtn.disabled = false;
+
+    for (let i = currentEpisodeIndex; i < episodes.length; i++) {
+      currentEpisodeIndex = i;
+      if (stopRequested) break;
+      while (paused) {
+        await new Promise(r => setTimeout(r, 400));
+        if (stopRequested) break;
+      }
+      if (stopRequested) break;
+      await generateEpisode(i);
+    }
+
+    running = false;
+    paused = false;
+    startBtn.disabled = false;
+    splitByCharsBtn.disabled = false;
+    pauseBtn.disabled = true;
+    stopBtn.disabled = true;
+    downloadBtn.disabled = episodes.filter(e => e.script).length === 0;
+    log("全部生成完成。");
+  }
+
+  // ===== 按钮事件 =====
+  startBtn.addEventListener("click", () => {
+    currentEpisodeIndex = 0;
+    runAll();
+  });
+  pauseBtn.addEventListener("click", () => {
+    if (!running) return;
+    paused = !paused;
+    pauseBtn.textContent = paused ? "继续" : "暂停";
+    if (paused) log("已暂停，可手动修改右侧内容。");
+  });
+  stopBtn.addEventListener("click", () => {
+    if (!running) return;
+    stopRequested = true;
+    paused = false;
+    pauseBtn.textContent = "暂停";
+    log("已终止，可下载已生成部分。");
+  });
+  clearBtn.addEventListener("click", () => {
+    logEl.textContent = "";
+    apiStreamEl.textContent = "";
+    resultEl.textContent = "";
+  });
+
+  saveRawBtn.addEventListener("click", () => {
+    const ep = episodes[currentEpisodeIndex];
+    if (!ep) return;
+    ep.raw = rawTextEl.value;
+    ep.rawLen = ep.raw.length;
+    log(`第 ${currentEpisodeIndex+1} 集原文已保存。`);
+    updateEstimate();
+  });
+  saveOutlineBtn.addEventListener("click", () => {
+    const ep = episodes[currentEpisodeIndex];
+    if (!ep) return;
+    ep.outline = outlineTextEl.value;
+    outlineStatusEl.textContent = `第 ${currentEpisodeIndex+1} 集大纲已保存`;
+  });
+  saveScriptBtn.addEventListener("click", () => {
+    const ep = episodes[currentEpisodeIndex];
+    if (!ep) return;
+    ep.script = scriptTextEl.value;
+    resultEl.textContent = episodes.filter(e => e.script).map(e => `【第${e.index+1}集】\n${e.script}`).join("\n\n");
+    renderEpisodesList(currentEpisodeIndex);
+    log(`第 ${currentEpisodeIndex+1} 集剧本已保存。`);
+  });
+  regenEpisodeBtn.addEventListener("click", async () => {
+    const i = currentEpisodeIndex;
+    await generateEpisode(i, false);
+  });
+  regenScriptBtn.addEventListener("click", async () => {
+    const i = currentEpisodeIndex;
+    await generateEpisode(i, true);
+  });
+
+  // ===== 下载合并剧本 =====
+  downloadBtn.addEventListener("click", () => {
+    const content = episodes.filter(e => e.script).map(e => `【第${e.index+1}集】\n${e.script}`).join("\n\n");
+    if (!content) return;
+    const blob = new Blob([content], {type: "text/plain;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "短剧改编剧本.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // ===== 导出成指定集数 =====
+  exportBtn.addEventListener("click", () => {
+    const targetCount = parseInt(finalEpisodeCountEl.value,10) || 0;
+    const scripts = episodes.map(e => e.script).filter(Boolean);
+    if (!scripts.length) {
+      alert("还没有生成任何剧本");
+      return;
+    }
+    let finalArr = [];
+    if (targetCount <= 0 || targetCount === scripts.length) {
+      finalArr = scripts;
+    } else if (targetCount < scripts.length) {
+      // 合并
+      const ratio = scripts.length / targetCount;
+      let acc = "";
+      let cur = 0;
+      for (let i = 0; i < scripts.length; i++) {
+        acc += `【第${i+1}集(原)】\n` + scripts[i] + "\n\n";
+        if ((i+1) >= Math.round((cur+1)*ratio) || i === scripts.length - 1) {
+          finalArr.push(acc.trim());
+          acc = "";
+          cur++;
+        }
+      }
+    } else {
+      // 拆分
+      const big = scripts.map((s,i)=>`【第${i+1}集(原)】\n${s}`).join("\n\n");
+      const parts = big.split(/\n\s*\n/);
+      const per = Math.ceil(parts.length / targetCount);
+      for (let i = 0; i < parts.length; i += per) {
+        finalArr.push(parts.slice(i, i+per).join("\n\n"));
+      }
+    }
+
+    const finalText = finalArr.map((txt,idx)=>`【第${idx+1}集】\n${txt}`).join("\n\n");
+    const blob = new Blob([finalText], {type: "text/plain;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "短剧改编剧本_重排版.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // ===== 调试面板逻辑 =====
+  function showDebugPanel() {
+    // 把当前页面的完整HTML塞进去
+    debugTextareaEl.value = document.documentElement.outerHTML;
+    debugPanelEl.style.height = "65vh";
+  }
+  function hideDebugPanel() {
+    debugPanelEl.style.height = "0";
+  }
+  showDebugBtn.addEventListener("click", showDebugPanel);
+  closeDebugBtn.addEventListener("click", hideDebugPanel);
+
+  saveDebugBtn.addEventListener("click", () => {
+    const code = debugTextareaEl.value;
+    localStorage.setItem('novel2script_custom_html', code);
+    const ts = new Date().toISOString().replace('T',' ').slice(0,19);
+    localStorage.setItem('novel2script_custom_html_version', ts);
+    alert("已保存，刷新后生效。");
+    location.reload();
+  });
+
+  // 页面加载时，更新版本号（如果有的话）
+  (function () {
+    const ver = localStorage.getItem('novel2script_custom_html_version');
+    if (ver) {
+      versionTagEl.textContent = "自定义版 " + ver;
+    }
+  })();
+</script>
+</body>
+</html>
